@@ -184,12 +184,12 @@ def visualize_stage1_groups(sample_image, ocr_processor):
             color = tuple([int(c * 255) for c in block_colors[idx][:3]])
             draw_blocks.rectangle(rect_bbox, outline=color, width=4)
             
-            # Thêm label số block
+            # Thêm label số block - INSIDE the box at top-left
             try:
                 font = ImageFont.truetype("arial.ttf", 20)
             except:
                 font = ImageFont.load_default()
-            draw_blocks.text((rect_bbox[0], rect_bbox[1]-25), f'Block {idx+1}', fill=color, font=font)
+            draw_blocks.text((rect_bbox[0] + 5, rect_bbox[1] + 5), f'Block {idx+1}', fill=color, font=font)
     
     axes[2].imshow(img_blocks)
     axes[2].set_title(f'Stage I-C: Blocks\n({len(layout["blocks"])} blocks)', 
