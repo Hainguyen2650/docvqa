@@ -318,21 +318,25 @@ class BBoxVisualizer:
             
             label = " | ".join(label_parts)
             
-            # Position label above bbox
+            # Position label INSIDE the bbox at top-left corner
             x_min = min(p[0] for p in points)
             y_min = min(p[1] for p in points)
             
+            # Label position: inside the box with small padding
+            label_x = x_min + 4
+            label_y = y_min + 4
+            
             # Draw label background
             if self._font:
-                bbox = draw.textbbox((x_min, y_min - 25), label, font=self._font)
-                padding = 4
+                bbox = draw.textbbox((label_x, label_y), label, font=self._font)
+                padding = 2
                 draw.rectangle(
                     [bbox[0] - padding, bbox[1] - padding, bbox[2] + padding, bbox[3] + padding],
-                    fill=(255, 255, 255, 200)
+                    fill=(255, 255, 255, 220)
                 )
-                draw.text((x_min, y_min - 25), label, fill=color, font=self._font)
+                draw.text((label_x, label_y), label, fill=color, font=self._font)
             else:
-                draw.text((x_min, y_min - 20), label, fill=color)
+                draw.text((label_x, label_y), label, fill=color)
     
     def _draw_legend(
         self,

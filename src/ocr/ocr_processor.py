@@ -463,9 +463,11 @@ class PaddleOCRProcessor:
                 points = [(int(p[0]), int(p[1])) for p in box]
                 draw.polygon(points, outline=color, width=3)
                 
-                # Vẽ label nếu được yêu cầu
+                # Vẽ label nếu được yêu cầu - INSIDE the box at top-left
                 if show_text:
-                    text_pos = (int(box[0][0]), int(box[0][1]) - 20)
+                    x_min = min(p[0] for p in points)
+                    y_min = min(p[1] for p in points)
+                    text_pos = (x_min + 3, y_min + 3)
                     label = f"{idx+1}: {conf:.2f}"
                     draw.text(text_pos, label, fill=color)
         
@@ -510,8 +512,10 @@ class PaddleOCRProcessor:
                 points = [(int(p[0]), int(p[1])) for p in bbox]
                 draw.polygon(points, outline=color, width=5)
                 
-                # Draw label
-                text_pos = (int(bbox[0][0]), int(bbox[0][1]) - 30)
+                # Draw label INSIDE the bbox at top-left corner
+                x_min = min(p[0] for p in points)
+                y_min = min(p[1] for p in points)
+                text_pos = (x_min + 5, y_min + 5)
                 label = f"{region_type.upper()} ({score:.2f})"
                 draw.text(text_pos, label, fill=color)
         
