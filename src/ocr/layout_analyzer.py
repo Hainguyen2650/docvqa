@@ -2,8 +2,14 @@
 Module phân tích layout của document từ kết quả OCR.
 Bao gồm:
 - Group token → line → block
-- Phát hiện region types (table, form, figure, text, layout)
+- Phát hiện region types (table, form, figure, text)
 - Trích xuất cấu trúc theo từng loại region
+
+Classification Method:
+- TABLE: Multiple columns aligned along x-axis, evenly spaced rows
+- FORM: Key:value pairs (Branch A: explicit pattern, Branch B: alignment-based)
+- FIGURE: Charts/plots with empty center, tick-like numbers, legend clusters
+- TEXT: Running paragraphs with uniform spacing, few columns
 """
 
 import numpy as np
@@ -20,8 +26,8 @@ class DocumentLayoutAnalyzer:
         self,
         y_overlap_threshold: float = 0.5,
         line_height_tolerance: float = 0.3,
-        max_x_gap_ratio: float = 3.0,  # Tỉ lệ so với median char width
-        block_vertical_gap: float = 20,  # Hard gap pixels (thay vì adaptive)
+        max_x_gap_ratio: float = 3.0,
+        block_vertical_gap: float = 20,
         block_x_overlap_threshold: float = 0.3
     ):
         """
@@ -42,27 +48,16 @@ class DocumentLayoutAnalyzer:
     
     @staticmethod
     def bbox_overlap_y(bbox1: List, bbox2: List) -> float:
-        """
-        Tính overlap ratio theo trục y của 2 bbox.
-        
-        Args:
-            bbox1, bbox2: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-            
-        Returns:
-            Overlap ratio (0-1)
-        """
-        # Lấy y_min, y_max
+        """Tính overlap ratio theo trục y của 2 bbox."""
         y1_min = min(p[1] for p in bbox1)
         y1_max = max(p[1] for p in bbox1)
         y2_min = min(p[1] for p in bbox2)
         y2_max = max(p[1] for p in bbox2)
         
-        # Tính overlap
         overlap_start = max(y1_min, y2_min)
         overlap_end = min(y1_max, y2_max)
         overlap = max(0, overlap_end - overlap_start)
         
-        # Height của mỗi bbox
         h1 = y1_max - y1_min
         h2 = y2_max - y2_min
         
@@ -87,18 +82,10 @@ class DocumentLayoutAnalyzer:
     
     @staticmethod
     def estimate_char_width(tokens: List[Dict]) -> float:
-        """
-        Ước tính độ rộng trung bình của một ký tự.
-        
-        Args:
-            tokens: List of tokens với 'box' và 'text'
-            
-        Returns:
-            Median char width
-        """
+        """Ước tính độ rộng trung bình của một ký tự."""
         char_widths = []
         for tok in tokens:
-            if tok['box'] and tok['text']:
+            if tok.get('box') and tok.get('text'):
                 x_min, _, x_max, _ = DocumentLayoutAnalyzer.bbox_bounds(tok['box'])
                 width = x_max - x_min
                 num_chars = len(tok['text'])
@@ -109,18 +96,10 @@ class DocumentLayoutAnalyzer:
     
     @staticmethod
     def estimate_line_height(tokens: List[Dict]) -> float:
-        """
-        Ước tính chiều cao trung bình của line (từ tokens).
-        
-        Args:
-            tokens: List of tokens với 'box'
-            
-        Returns:
-            Median line height
-        """
+        """Ước tính chiều cao trung bình của line."""
         heights = []
         for tok in tokens:
-            if tok['box']:
+            if tok.get('box'):
                 _, y_min, _, y_max = DocumentLayoutAnalyzer.bbox_bounds(tok['box'])
                 heights.append(y_max - y_min)
         
@@ -131,22 +110,18 @@ class DocumentLayoutAnalyzer:
         """
         Phát hiện pattern "key: value" trong lines.
         
-        Args:
-            lines: List of lines với 'text'
-            
         Returns:
             {
                 'has_pattern': bool,
-                'keyvalue_ratio': float,  # Tỉ lệ lines có pattern
-                'avg_key_length': float,  # Độ dài trung bình của key
-                'keyvalue_lines': List[str]  # Danh sách các dòng có pattern
+                'keyvalue_ratio': float,
+                'avg_key_length': float,
+                'keyvalue_lines': List[str]
             }
         """
         if not lines:
-            return {'has_pattern': False, 'keyvalue_ratio': 0.0}
+            return {'has_pattern': False, 'keyvalue_ratio': 0.0, 'avg_key_length': 0.0, 'keyvalue_lines': []}
         
         # Pattern: "key: value" hoặc "key : value"
-        # Key thường ngắn (< 50 chars), value có thể dài hoặc ngắn
         keyvalue_pattern = re.compile(r'^([^:]{1,50}):\s*(.+)$')
         
         keyvalue_lines = []
@@ -160,7 +135,6 @@ class DocumentLayoutAnalyzer:
                 key = match.group(1).strip()
                 value = match.group(2).strip()
                 
-                # Filter: key không quá dài, value có nội dung
                 if len(key) > 0 and len(key) < 50 and len(value) > 0:
                     keyvalue_lines.append(text)
                     key_lengths.append(len(key))
@@ -168,7 +142,7 @@ class DocumentLayoutAnalyzer:
         keyvalue_ratio = len(keyvalue_lines) / len(lines) if lines else 0.0
         avg_key_length = np.mean(key_lengths) if key_lengths else 0.0
         
-        # Có pattern nếu >= 40% lines là key:value
+        # Pattern detected if >= 40% lines are key:value with at least 2 matches
         has_pattern = (keyvalue_ratio >= 0.4 and len(keyvalue_lines) >= 2)
         
         return {
@@ -179,29 +153,18 @@ class DocumentLayoutAnalyzer:
         }
     
     def group_tokens_to_lines(self, ocr_result: Dict[str, Any]) -> List[Dict]:
-        """
-        Gom các token thành lines dựa trên y-overlap và x-distance.
-        
-        Args:
-            ocr_result: Kết quả OCR với 'details' chứa tokens
-            
-        Returns:
-            List of lines, mỗi line có {text, bbox, tokens, token_ids}
-        """
-        if not ocr_result['success'] or not ocr_result['details']:
+        """Gom các token thành lines dựa trên y-overlap và x-distance."""
+        if not ocr_result.get('success') or not ocr_result.get('details'):
             return []
         
         tokens = ocr_result['details']
         n_tokens = len(tokens)
         
-        # Tính median height và char width để làm reference
         median_height = self.estimate_line_height(tokens)
         median_char_width = self.estimate_char_width(tokens)
-        
-        # Tính max_x_gap dựa trên char width
         max_x_gap = self.max_x_gap_ratio * median_char_width
         
-        # Dùng union-find để gom tokens
+        # Union-find
         parent = list(range(n_tokens))
         
         def find(i):
@@ -214,49 +177,38 @@ class DocumentLayoutAnalyzer:
             if pi != pj:
                 parent[pi] = pj
         
-        # Merge tokens if they satisfy line conditions
         for i in range(n_tokens):
             for j in range(i + 1, n_tokens):
-                if not tokens[i]['box'] or not tokens[j]['box']:
+                if not tokens[i].get('box') or not tokens[j].get('box'):
                     continue
                 
-                # Check y-overlap
                 y_overlap = self.bbox_overlap_y(tokens[i]['box'], tokens[j]['box'])
-                
-                # Check y-center difference
                 cx_i, cy_i = self.bbox_center(tokens[i]['box'])
                 cx_j, cy_j = self.bbox_center(tokens[j]['box'])
                 y_diff = abs(cy_i - cy_j)
                 
-                # Check x-distance
                 x_i_min, _, x_i_max, _ = self.bbox_bounds(tokens[i]['box'])
                 x_j_min, _, x_j_max, _ = self.bbox_bounds(tokens[j]['box'])
                 x_gap = min(abs(x_i_max - x_j_min), abs(x_j_max - x_i_min))
                 
-                # Merge condition
                 if (y_overlap >= self.y_overlap_threshold or 
-                    y_diff < self.line_height_tolerance * median_height) and \
-                   x_gap < max_x_gap:
+                    y_diff < self.line_height_tolerance * median_height) and x_gap < max_x_gap:
                     union(i, j)
         
-        # Group tokens by component
         groups = defaultdict(list)
         for i in range(n_tokens):
             groups[find(i)].append(i)
         
-        # Create lines
         lines = []
         for group_indices in groups.values():
             line_tokens = [tokens[i] for i in sorted(group_indices, 
-                                                     key=lambda idx: self.bbox_center(tokens[idx]['box'])[0])]
+                key=lambda idx: self.bbox_center(tokens[idx]['box'])[0] if tokens[idx].get('box') else 0)]
             
-            # Merge text
-            line_text = ' '.join(tok['text'] for tok in line_tokens)
+            line_text = ' '.join(tok.get('text', '') for tok in line_tokens)
             
-            # Merge bbox
             all_coords = []
             for tok in line_tokens:
-                if tok['box']:
+                if tok.get('box'):
                     all_coords.extend(tok['box'])
             
             if all_coords:
@@ -278,69 +230,51 @@ class DocumentLayoutAnalyzer:
                 'token_ids': group_indices
             })
         
-        # Sort lines top to bottom
-        lines.sort(key=lambda line: self.bbox_center(line['bbox'])[1] if line['bbox'] else 0)
-        
+        lines.sort(key=lambda line: self.bbox_center(line['bbox'])[1] if line.get('bbox') else 0)
         return lines
     
     def group_lines_to_blocks(self, lines: List[Dict]) -> List[Dict]:
-        """
-        Gom các lines thành blocks dựa trên vertical gap và x-overlap.
-        
-        Args:
-            lines: List of lines từ group_tokens_to_lines
-            
-        Returns:
-            List of blocks, mỗi block có {lines, bbox, line_ids}
-        """
+        """Gom các lines thành blocks dựa trên vertical gap và x-overlap."""
         if not lines:
             return []
         
         n_lines = len(lines)
+        vertical_gap_threshold = self.block_vertical_gap
         
-        # Sử dụng hard gap thay vì adaptive gap (tránh nhiễu từ bbox kích thước khác nhau)
-        vertical_gap_threshold = self.block_vertical_gap  # Fixed 20 pixels
-        
-        # Tính median line width để xác định x1_close threshold
         line_widths = []
         for line in lines:
-            if line['bbox']:
+            if line.get('bbox'):
                 x_min, _, x_max, _ = self.bbox_bounds(line['bbox'])
                 line_widths.append(x_max - x_min)
         
         median_line_width = np.median(line_widths) if line_widths else 100.0
-        x1_close_threshold = 0.05 * median_line_width  # 5% of median width
+        x1_close_threshold = 0.05 * median_line_width
         
-        # Build adjacency graph
         adj = defaultdict(list)
         
         for i in range(n_lines):
             for j in range(i + 1, n_lines):
-                if not lines[i]['bbox'] or not lines[j]['bbox']:
+                if not lines[i].get('bbox') or not lines[j].get('bbox'):
                     continue
                 
-                # Check vertical distance
                 xi_min, yi_min, xi_max, yi_max = self.bbox_bounds(lines[i]['bbox'])
                 xj_min, yj_min, xj_max, yj_max = self.bbox_bounds(lines[j]['bbox'])
                 
                 v_gap = min(abs(yi_max - yj_min), abs(yj_max - yi_min))
                 
-                # Check x-overlap
                 x_overlap_start = max(xi_min, xj_min)
                 x_overlap_end = min(xi_max, xj_max)
                 x_overlap = max(0, x_overlap_end - x_overlap_start)
-                x_overlap_ratio = x_overlap / min(xi_max - xi_min, xj_max - xj_min)
+                min_width = min(xi_max - xi_min, xj_max - xj_min)
+                x_overlap_ratio = x_overlap / min_width if min_width > 0 else 0
                 
-                # Also check if x1 positions are close (for aligned text)
                 x1_close = abs(xi_min - xj_min) < x1_close_threshold
                 
-                # Connect if close vertically and have x-overlap or aligned
                 if v_gap < vertical_gap_threshold and \
                    (x_overlap_ratio >= self.block_x_overlap_threshold or x1_close):
                     adj[i].append(j)
                     adj[j].append(i)
         
-        # Find connected components using DFS
         visited = [False] * n_lines
         blocks = []
         
@@ -357,12 +291,11 @@ class DocumentLayoutAnalyzer:
                 dfs(i, component)
                 
                 block_lines = [lines[idx] for idx in sorted(component, 
-                                                            key=lambda idx: self.bbox_center(lines[idx]['bbox'])[1])]
+                    key=lambda idx: self.bbox_center(lines[idx]['bbox'])[1] if lines[idx].get('bbox') else 0)]
                 
-                # Merge bbox
                 all_coords = []
                 for line in block_lines:
-                    if line['bbox']:
+                    if line.get('bbox'):
                         all_coords.extend(line['bbox'])
                 
                 if all_coords:
@@ -377,142 +310,164 @@ class DocumentLayoutAnalyzer:
                 else:
                     block_bbox = None
                 
-                # Phát hiện key:value pattern trong block
                 keyvalue_info = self.detect_keyvalue_pattern(block_lines)
                 
                 blocks.append({
                     'lines': block_lines,
                     'bbox': block_bbox,
                     'line_ids': component,
-                    'keyvalue_pattern': keyvalue_info  # Metadata cho form detection
+                    'keyvalue_pattern': keyvalue_info
                 })
         
         return blocks
     
     def detect_table_region(self, block: Dict) -> Dict:
         """
-        Phát hiện table region từ block.
+        Phát hiện TABLE region từ block.
         
-        Returns:
-            {
-                'is_table': bool,
-                'score': float,
-                'num_cols': int,
-                'col_stability': float,
-                'row_spacing_var': float
-            }
+        Algorithm:
+        1. Collect all x_centers of tokens within block
+        2. Use DBSCAN clustering to estimate columns:
+           - eps = max(30, 3 * median_char_width) (adaptive to font size)
+           - num_cols_est = number of clusters (excluding noise -1)
+        3. Calculate col_stability: ratio of lines with >= 2 tokens aligned to columns
+           - alignment_threshold = max(30, 3 * median_char_width)
+        4. Calculate row_spacing_var: variance of row spacing (std/mean of y_gaps)
+        
+        Table conditions:
+        - num_cols_est >= 3
+        - col_stability >= 0.6
+        - row_spacing_var < 0.3
+        
+        Score: increases with columns and alignment, decreases with spacing variance
         """
-        lines = block['lines']
+        lines = block.get('lines', [])
         if len(lines) < 2:
-            return {'is_table': False, 'score': 0.0}
+            return {'is_table': False, 'score': 0.0, 'num_cols': 0, 'col_stability': 0.0, 'row_spacing_var': 1.0}
         
         # Collect all token x_centers
         x_centers = []
-        for line in lines:
-            for tok in line['tokens']:
-                if tok['box']:
-                    cx, _ = self.bbox_center(tok['box'])
-                    x_centers.append(cx)
-        
-        if len(x_centers) < 5:
-            return {'is_table': False, 'score': 0.0}
-        
-        # Tính median char width để xác định eps cho clustering
         all_tokens = []
         for line in lines:
-            all_tokens.extend(line['tokens'])
-        median_char_width = self.estimate_char_width(all_tokens)
-        clustering_eps = max(30, 3 * median_char_width)  # Adaptive eps
+            for tok in line.get('tokens', []):
+                if tok.get('box'):
+                    cx, _ = self.bbox_center(tok['box'])
+                    x_centers.append(cx)
+                    all_tokens.append(tok)
         
-        # Cluster x_centers to find columns
+        if len(x_centers) < 5:
+            return {'is_table': False, 'score': 0.0, 'num_cols': 0, 'col_stability': 0.0, 'row_spacing_var': 1.0}
+        
+        # Adaptive eps based on font size
+        median_char_width = self.estimate_char_width(all_tokens)
+        clustering_eps = max(30, 3 * median_char_width)
+        
+        # DBSCAN clustering on x_centers to find columns
         X = np.array(x_centers).reshape(-1, 1)
         clustering = DBSCAN(eps=clustering_eps, min_samples=2).fit(X)
         labels = clustering.labels_
         num_cols_est = len(set(labels)) - (1 if -1 in labels else 0)
         
-        # Calculate col_stability: % of lines where tokens align with column clusters
+        # Calculate column centers
         col_centers = []
         for label in set(labels):
             if label != -1:
                 cluster_points = X[labels == label]
                 col_centers.append(np.mean(cluster_points))
-        
         col_centers = sorted(col_centers)
         
-        # Tính token alignment threshold dựa trên char width
+        # Alignment threshold (same as eps)
         alignment_threshold = max(30, 3 * median_char_width)
         
+        # col_stability: proportion of lines where >= 2 tokens are "near" column centers
         aligned_lines = 0
         for line in lines:
-            token_cols = []
-            for tok in line['tokens']:
-                if tok['box']:
+            aligned_tokens_count = 0
+            for tok in line.get('tokens', []):
+                if tok.get('box') and col_centers:
                     cx, _ = self.bbox_center(tok['box'])
-                    # Find closest column
-                    if col_centers:
-                        closest_dist = min(abs(cx - cc) for cc in col_centers)
-                        if closest_dist < alignment_threshold:
-                            token_cols.append(True)
+                    closest_dist = min(abs(cx - cc) for cc in col_centers)
+                    if closest_dist < alignment_threshold:
+                        aligned_tokens_count += 1
             
-            if len(token_cols) >= 2:  # At least 2 tokens aligned
+            if aligned_tokens_count >= 2:
                 aligned_lines += 1
         
         col_stability = aligned_lines / len(lines) if lines else 0.0
         
-        # Calculate row spacing variance
-        y_centers = [self.bbox_center(line['bbox'])[1] for line in lines if line['bbox']]
+        # row_spacing_var: std/mean of y_gaps
+        y_centers = [self.bbox_center(line['bbox'])[1] for line in lines if line.get('bbox')]
         if len(y_centers) >= 2:
-            y_gaps = [y_centers[i+1] - y_centers[i] for i in range(len(y_centers)-1)]
-            row_spacing_var = np.std(y_gaps) / np.mean(y_gaps) if np.mean(y_gaps) > 0 else 1.0
+            y_centers_sorted = sorted(y_centers)
+            y_gaps = [y_centers_sorted[i+1] - y_centers_sorted[i] for i in range(len(y_centers_sorted)-1)]
+            mean_gap = np.mean(y_gaps)
+            row_spacing_var = np.std(y_gaps) / mean_gap if mean_gap > 0 else 1.0
         else:
             row_spacing_var = 1.0
         
-        # Table score
+        # Table conditions
         is_table = (num_cols_est >= 3 and col_stability >= 0.6 and row_spacing_var < 0.3)
-        score = (num_cols_est / 10.0) * col_stability * (1 - row_spacing_var)
+        
+        # Score: increases with columns and alignment, decreases with spacing variance
+        # Normalize num_cols contribution (cap at 10 columns)
+        cols_score = min(1.0, num_cols_est / 10.0)
+        variance_penalty = 1.0 - min(1.0, row_spacing_var)
+        score = cols_score * 0.3 + col_stability * 0.5 + variance_penalty * 0.2
         
         return {
             'is_table': is_table,
             'score': score,
             'num_cols': num_cols_est,
             'col_stability': col_stability,
-            'row_spacing_var': row_spacing_var
+            'row_spacing_var': row_spacing_var,
+            'alignment_threshold': alignment_threshold
         }
     
     def detect_form_region(self, block: Dict) -> Dict:
         """
-        Phát hiện form region (key:value pairs) từ block.
+        Phát hiện FORM region (key:value pairs) từ block.
         
-        Returns:
-            {
-                'is_form': bool,
-                'score': float,
-                'colon_ratio': float,
-                'left_alignment': float,
-                'right_alignment': float,
-                'avg_line_length': float,
-                'line_length_variance': float
-            }
+        Two branches:
+        
+        Branch A (high priority): 
+        - If keyvalue_pattern.has_pattern=True (detected "key: value" patterns)
+        - Immediately conclude form with high score (~0.9+)
+        - Set text_boost_score to negative to avoid misclassification as text
+        
+        Branch B (fallback):
+        - Measure left_alignment and right_alignment (1 - std/mean of x_min/x_max)
+        - Statistics on line length (chars), short/long line ratios, variance
+        - Distinguish Form vs Justified text:
+          * Justified text: both margins aligned, many long lines, high avg_line_length
+          * Form: many short lines, varying length (short key, long value), contains ":"
+        
+        Returns text_boost_score for use by text detector.
         """
-        lines = block['lines']
+        lines = block.get('lines', [])
         if len(lines) < 2:
-            return {'is_form': False, 'score': 0.0}
+            return {
+                'is_form': False, 'score': 0.0, 'text_boost_score': 0.0,
+                'has_keyvalue_pattern': False, 'keyvalue_ratio': 0.0,
+                'colon_ratio': 0.0, 'left_alignment': 0.0, 'right_alignment': 0.0,
+                'avg_line_length': 0.0, 'line_length_variance': 0.0,
+                'short_line_ratio': 0.0, 'long_line_ratio': 0.0, 'is_justified_text': False
+            }
         
-        # ===== SỬ DỤNG KEY:VALUE PATTERN TỪ METADATA =====
+        # ===== BRANCH A: Key:Value Pattern Detection =====
         keyvalue_info = block.get('keyvalue_pattern', {})
         has_keyvalue_pattern = keyvalue_info.get('has_pattern', False)
         keyvalue_ratio = keyvalue_info.get('keyvalue_ratio', 0.0)
         
-        # Nếu phát hiện pattern rõ ràng → XÁC ĐỊNH FORM NGAY
         if has_keyvalue_pattern:
+            # High confidence form detection
             return {
                 'is_form': True,
-                'score': 0.9 + keyvalue_ratio * 0.1,  # High score
-                'text_boost_score': -0.3,  # Penalty cho text
-                'keyvalue_ratio': keyvalue_ratio,
+                'score': 0.9 + keyvalue_ratio * 0.1,  # Score ~0.9-1.0
+                'text_boost_score': -0.3,  # Negative penalty for text detection
                 'has_keyvalue_pattern': True,
+                'keyvalue_ratio': keyvalue_ratio,
                 'colon_ratio': keyvalue_ratio,
-                'left_alignment': 1.0,  # Assumed
+                'left_alignment': 1.0,
                 'right_alignment': 0.0,
                 'avg_line_length': keyvalue_info.get('avg_key_length', 0.0),
                 'line_length_variance': 0.0,
@@ -521,80 +476,63 @@ class DocumentLayoutAnalyzer:
                 'is_justified_text': False
             }
         
-        # ===== LOGIC CŨ: Phân tích alignment và statistics =====
-        # Tận dụng keyvalue_ratio từ metadata thay vì đếm lại
-        colon_ratio = keyvalue_ratio  # Đã được tính trong detect_keyvalue_pattern
+        # ===== BRANCH B: Alignment-based Detection =====
+        # Calculate colon ratio from keyvalue_ratio
+        colon_ratio = keyvalue_ratio
         
-        # Check left alignment (keys)
-        left_x = [self.bbox_bounds(line['bbox'])[0] for line in lines if line['bbox']]
+        # Left alignment: stability of x_min positions (1 - std/mean)
+        left_x = [self.bbox_bounds(line['bbox'])[0] for line in lines if line.get('bbox')]
         left_alignment = 0.0
         if len(left_x) >= 2:
-            left_std = np.std(left_x)
             left_mean = np.mean(left_x)
+            left_std = np.std(left_x)
             left_alignment = 1.0 - min(1.0, left_std / max(left_mean, 1.0))
         
-        # Check right alignment (values)
-        right_x = [self.bbox_bounds(line['bbox'])[2] for line in lines if line['bbox']]
+        # Right alignment: stability of x_max positions (1 - std/mean)
+        right_x = [self.bbox_bounds(line['bbox'])[2] for line in lines if line.get('bbox')]
         right_alignment = 0.0
         if len(right_x) >= 2:
-            right_std = np.std(right_x)
             right_mean = np.mean(right_x)
+            right_std = np.std(right_x)
             right_alignment = 1.0 - min(1.0, right_std / max(right_mean, 1.0))
         
-        # ===== PHÂN BIỆT FORM vs JUSTIFIED TEXT =====
-        # 1. Đo độ dài dòng (characters)
-        line_lengths = [len(line['text']) for line in lines]
-        avg_line_length = np.mean(line_lengths)
-        line_length_variance = np.std(line_lengths) / max(np.mean(line_lengths), 1.0)
+        # Line length statistics (in characters)
+        line_lengths = [len(line.get('text', '')) for line in lines]
+        avg_line_length = np.mean(line_lengths) if line_lengths else 0.0
+        line_length_variance = np.std(line_lengths) / max(avg_line_length, 1.0) if line_lengths else 0.0
         
-        # 2. Đo độ rộng bbox của dòng (pixels)
-        line_widths = []
-        for line in lines:
-            if line['bbox']:
-                x_min, _, x_max, _ = self.bbox_bounds(line['bbox'])
-                line_widths.append(x_max - x_min)
+        # Short/long line ratios
+        short_lines = sum(1 for l in line_lengths if l < 40)
+        long_lines = sum(1 for l in line_lengths if l > 60)
+        short_line_ratio = short_lines / len(lines) if lines else 0.0
+        long_line_ratio = long_lines / len(lines) if lines else 0.0
         
-        avg_line_width = np.mean(line_widths) if line_widths else 0
-        line_width_variance = np.std(line_widths) / max(np.mean(line_widths), 1.0) if line_widths else 0
-        
-        # 3. Kiểm tra pattern của form: nhiều dòng ngắn
-        short_lines = sum(1 for l in line_lengths if l < 40)  # Dòng < 40 ký tự
-        short_line_ratio = short_lines / len(lines) if lines else 0
-        
-        # 4. Kiểm tra có nhiều dòng dài (văn bản thông thường)
-        long_lines = sum(1 for l in line_lengths if l > 60)  # Dòng > 60 ký tự
-        long_line_ratio = long_lines / len(lines) if lines else 0
-        
-        # ===== LOGIC PHÂN LOẠI =====
-        # Nếu cả left và right alignment cao + nhiều dòng dài → Justified Text, không phải Form
+        # ===== Distinguish Form vs Justified Text =====
+        # Justified text: both margins aligned, many long lines, high avg_line_length
         is_justified_text = (
-            left_alignment >= 0.8 and 
-            right_alignment >= 0.7 and 
-            long_line_ratio >= 0.5 and  # Hơn 50% dòng dài
-            avg_line_length > 50  # Dòng trung bình dài
+            left_alignment >= 0.8 and
+            right_alignment >= 0.7 and
+            long_line_ratio >= 0.5 and
+            avg_line_length > 50
         )
         
-        # Form thật: ngắn, đứt gãy, variance cao (key ngắn, value dài bất đối xứng)
-        # QUAN TRỌNG: Form phải có ít nhất một chút dấu ":" để tránh nhầm với địa chỉ/contact info
+        # Form: many short lines, varying length, contains colons, right not aligned
         is_true_form = (
-            colon_ratio >= 0.25 and  # Nhiều dấu ":" (giảm từ 0.3)
-            short_line_ratio >= 0.3 and  # Nhiều dòng ngắn (giảm từ 0.4)
-            line_length_variance > 0.25  # Độ dài không đều (giảm từ 0.3)
-        ) or (
-            colon_ratio >= 0.1 and  # Ít nhất 10% lines có ":" (giảm từ 0.15 để bắt form nhỏ)
-            left_alignment >= 0.65 and  # Giảm từ 0.7
-            right_alignment < 0.65 and  # Right KHÔNG thẳng (khác justified)
-            short_line_ratio >= 0.25  # Giảm từ 0.3
+            # Option 1: Many colons + short lines + varying length
+            (colon_ratio >= 0.25 and short_line_ratio >= 0.3 and line_length_variance > 0.25)
+            or
+            # Option 2: Some colons + left aligned + right NOT aligned + short lines
+            (colon_ratio >= 0.1 and left_alignment >= 0.65 and right_alignment < 0.65 and short_line_ratio >= 0.25)
         )
         
-        # Form score và Text boost
-        text_boost_score = 0.0  # Điểm cộng cho text region
+        # Calculate scores and text_boost_score
+        text_boost_score = 0.0
         
         if is_justified_text:
-            # Penalty for form, boost for text
+            # This is justified text, not a form
             is_form = False
             score = 0.0
-            # Cộng điểm cho text region
+            # Positive boost for text detection
             text_boost_score = (
                 (left_alignment + right_alignment) / 2 * 0.4 +
                 long_line_ratio * 0.3 +
@@ -602,14 +540,13 @@ class DocumentLayoutAnalyzer:
             )
         elif is_true_form:
             is_form = True
-            # Score tăng với colon_ratio, short_line_ratio, line_length_variance
             score = (
-                colon_ratio * 0.4 + 
-                short_line_ratio * 0.3 + 
+                colon_ratio * 0.4 +
+                short_line_ratio * 0.3 +
                 line_length_variance * 0.2 +
                 left_alignment * 0.1
             )
-            # Giảm điểm cho text region
+            # Negative boost for text detection
             text_boost_score = -0.2
         else:
             is_form = False
@@ -619,9 +556,9 @@ class DocumentLayoutAnalyzer:
         return {
             'is_form': is_form,
             'score': score,
-            'text_boost_score': text_boost_score,  # Điểm cộng cho text
-            'has_keyvalue_pattern': False,  # Không có pattern rõ ràng
-            'keyvalue_ratio': colon_ratio,  # Fallback to colon_ratio
+            'text_boost_score': text_boost_score,
+            'has_keyvalue_pattern': False,
+            'keyvalue_ratio': keyvalue_ratio,
             'colon_ratio': colon_ratio,
             'left_alignment': left_alignment,
             'right_alignment': right_alignment,
@@ -634,73 +571,91 @@ class DocumentLayoutAnalyzer:
     
     def detect_figure_region(self, block: Dict) -> Dict:
         """
-        Phát hiện figure region (chart/plot) từ block.
+        Phát hiện FIGURE region (chart/plot) từ block.
         
-        Returns:
-            {
-                'is_figure': bool,
-                'score': float,
-                'empty_center_ratio': float,
-                'tick_like_numbers': int,
-                'legend_cluster': bool
-            }
+        Heuristic based on token density:
+        1. Create 20×20 grid covering block's bbox
+        2. Mark cells occupied by tokens
+        3. Calculate:
+           - empty_center_ratio: proportion of empty cells in center area (middle of chart often empty)
+           - tick_like_numbers: count of short numeric tokens (<=6 chars) resembling axis ticks
+           - legend_cluster: tokens located on right side (x > 70% width), suggesting legend
+        
+        Figure conditions:
+        - empty_center_ratio >= 0.3 AND (tick_like_numbers >= 5 OR legend_cluster=True)
+        
+        Score = empty_center * 0.5 + tick_density * 0.3 + legend_bonus * 0.2
         """
-        lines = block['lines']
-        if not block['bbox']:
-            return {'is_figure': False, 'score': 0.0}
+        lines = block.get('lines', [])
+        bbox = block.get('bbox')
         
-        x_min, y_min, x_max, y_max = self.bbox_bounds(block['bbox'])
+        if not bbox:
+            return {
+                'is_figure': False, 'score': 0.0,
+                'empty_center_ratio': 0.0, 'tick_like_numbers': 0, 'legend_cluster': False
+            }
+        
+        x_min, y_min, x_max, y_max = self.bbox_bounds(bbox)
         width = x_max - x_min
         height = y_max - y_min
         
         if width == 0 or height == 0:
-            return {'is_figure': False, 'score': 0.0}
+            return {
+                'is_figure': False, 'score': 0.0,
+                'empty_center_ratio': 0.0, 'tick_like_numbers': 0, 'legend_cluster': False
+            }
         
-        # Create grid to check empty center
+        # Create 20×20 grid
         grid_size = 20
         grid = np.zeros((grid_size, grid_size))
         
+        # Mark cells occupied by tokens
         for line in lines:
-            for tok in line['tokens']:
-                if tok['box']:
+            for tok in line.get('tokens', []):
+                if tok.get('box'):
                     tx_min, ty_min, tx_max, ty_max = self.bbox_bounds(tok['box'])
-                    # Map to grid
+                    
                     gx1 = int((tx_min - x_min) / width * grid_size)
                     gy1 = int((ty_min - y_min) / height * grid_size)
                     gx2 = int((tx_max - x_min) / width * grid_size)
                     gy2 = int((ty_max - y_min) / height * grid_size)
                     
-                    for gx in range(max(0, gx1), min(grid_size, gx2+1)):
-                        for gy in range(max(0, gy1), min(grid_size, gy2+1)):
+                    for gx in range(max(0, gx1), min(grid_size, gx2 + 1)):
+                        for gy in range(max(0, gy1), min(grid_size, gy2 + 1)):
                             grid[gy, gx] = 1
         
-        # Check center area
-        center_start = grid_size // 4
-        center_end = 3 * grid_size // 4
+        # empty_center_ratio: center area (middle 50%)
+        center_start = grid_size // 4  # 5
+        center_end = 3 * grid_size // 4  # 15
         center_area = grid[center_start:center_end, center_start:center_end]
         empty_center_ratio = 1.0 - (np.sum(center_area) / center_area.size)
         
-        # Count tick-like numbers (short numeric tokens)
+        # tick_like_numbers: short numeric tokens (<=6 chars)
         tick_like_numbers = 0
         for line in lines:
-            for tok in line['tokens']:
-                if re.match(r'^-?\d+\.?\d*$', tok['text'].strip()) and len(tok['text'].strip()) <= 6:
+            for tok in line.get('tokens', []):
+                text = tok.get('text', '').strip()
+                if re.match(r'^-?\d+\.?\d*$', text) and len(text) <= 6:
                     tick_like_numbers += 1
         
-        # Check for legend cluster (tokens stacked vertically on right)
-        right_tokens = []
+        # legend_cluster: tokens on right side (x > 70% width)
+        right_tokens = 0
         for line in lines:
-            for tok in line['tokens']:
-                if tok['box']:
+            for tok in line.get('tokens', []):
+                if tok.get('box'):
                     tx_min, _, _, _ = self.bbox_bounds(tok['box'])
                     if tx_min > x_min + 0.7 * width:
-                        right_tokens.append(tok)
+                        right_tokens += 1
         
-        legend_cluster = len(right_tokens) >= 3
+        legend_cluster = right_tokens >= 3
         
-        # Figure score
+        # Figure conditions
         is_figure = (empty_center_ratio >= 0.3 and (tick_like_numbers >= 5 or legend_cluster))
-        score = empty_center_ratio * 0.5 + min(1.0, tick_like_numbers / 10.0) * 0.3 + (0.2 if legend_cluster else 0.0)
+        
+        # Score calculation
+        tick_density = min(1.0, tick_like_numbers / 10.0)
+        legend_bonus = 0.2 if legend_cluster else 0.0
+        score = empty_center_ratio * 0.5 + tick_density * 0.3 + legend_bonus
         
         return {
             'is_figure': is_figure,
@@ -712,115 +667,128 @@ class DocumentLayoutAnalyzer:
     
     def detect_text_region(self, block: Dict, form_boost: float = 0.0) -> Dict:
         """
-        Phát hiện running text region từ block.
+        Phát hiện TEXT region (running paragraph) từ block.
+        
+        Text features:
+        - Multiple lines with sufficient average length (avg_line_length)
+        - Relatively even line spacing (spacing_uniformity)
+        - Not many columns (few_columns) - estimated using DBSCAN on x_centers
+        - Boost if 'justified text' is recognized (aligned on both margins)
+        
+        Also receives form_boost from detect_form:
+        - If detect_form detected 'justified text', it passes positive boost to text
+        - If detect_form detected true form, it passes negative boost
         
         Args:
-            block: Block để phân tích
-            form_boost: Điểm cộng từ form detection (nếu phát hiện justified text)
-        
-        Returns:
-            {
-                'is_text': bool,
-                'score': float,
-                'avg_line_length': float,
-                'spacing_uniformity': float,
-                'justified_boost': float
-            }
+            block: Block to analyze
+            form_boost: Score adjustment from form detection
         """
-        lines = block['lines']
+        lines = block.get('lines', [])
         if len(lines) < 2:
-            return {'is_text': False, 'score': 0.0}
+            return {
+                'is_text': False, 'score': 0.0,
+                'avg_line_length': 0.0, 'spacing_uniformity': 0.0,
+                'few_columns': True, 'num_cols': 0,
+                'justified_boost': 0.0, 'form_boost': form_boost
+            }
         
         # Average line length (in characters)
-        line_lengths = [len(line['text']) for line in lines]
-        avg_line_length = np.mean(line_lengths)
+        line_lengths = [len(line.get('text', '')) for line in lines]
+        avg_line_length = np.mean(line_lengths) if line_lengths else 0.0
         
-        # Check spacing uniformity
-        y_centers = [self.bbox_center(line['bbox'])[1] for line in lines if line['bbox']]
+        # Spacing uniformity: 1 - std/mean of y_gaps
+        y_centers = [self.bbox_center(line['bbox'])[1] for line in lines if line.get('bbox')]
         if len(y_centers) >= 2:
-            y_gaps = [y_centers[i+1] - y_centers[i] for i in range(len(y_centers)-1)]
-            spacing_uniformity = 1.0 - min(1.0, np.std(y_gaps) / max(np.mean(y_gaps), 1.0))
+            y_centers_sorted = sorted(y_centers)
+            y_gaps = [y_centers_sorted[i+1] - y_centers_sorted[i] for i in range(len(y_centers_sorted)-1)]
+            mean_gap = np.mean(y_gaps)
+            spacing_uniformity = 1.0 - min(1.0, np.std(y_gaps) / max(mean_gap, 1.0))
         else:
             spacing_uniformity = 0.0
         
-        # Check for few columns (not table-like)
+        # Few columns check using DBSCAN on x_centers
         x_centers = []
+        all_tokens = []
         for line in lines:
-            for tok in line['tokens']:
-                if tok['box']:
+            for tok in line.get('tokens', []):
+                if tok.get('box'):
                     cx, _ = self.bbox_center(tok['box'])
                     x_centers.append(cx)
+                    all_tokens.append(tok)
         
+        num_cols = 0
+        few_columns = True
         if x_centers:
-            X = np.array(x_centers).reshape(-1, 1)
-            # Tính adaptive eps dựa trên char width
-            all_tokens = []
-            for line in lines:
-                all_tokens.extend(line['tokens'])
             median_char_width = self.estimate_char_width(all_tokens)
             clustering_eps = max(30, 3 * median_char_width)
             
+            X = np.array(x_centers).reshape(-1, 1)
             clustering = DBSCAN(eps=clustering_eps, min_samples=2).fit(X)
             num_cols = len(set(clustering.labels_)) - (1 if -1 in clustering.labels_ else 0)
             few_columns = (num_cols <= 2)
-        else:
-            few_columns = True
         
-        # ===== DETECT JUSTIFIED TEXT PATTERN =====
-        # Check alignment (từ form detection logic)
-        left_x = [self.bbox_bounds(line['bbox'])[0] for line in lines if line['bbox']]
-        right_x = [self.bbox_bounds(line['bbox'])[2] for line in lines if line['bbox']]
+        # Check for justified text pattern (boost)
+        left_x = [self.bbox_bounds(line['bbox'])[0] for line in lines if line.get('bbox')]
+        right_x = [self.bbox_bounds(line['bbox'])[2] for line in lines if line.get('bbox')]
         
         left_alignment = 0.0
         if len(left_x) >= 2:
-            left_std = np.std(left_x)
             left_mean = np.mean(left_x)
+            left_std = np.std(left_x)
             left_alignment = 1.0 - min(1.0, left_std / max(left_mean, 1.0))
         
         right_alignment = 0.0
         if len(right_x) >= 2:
-            right_std = np.std(right_x)
             right_mean = np.mean(right_x)
+            right_std = np.std(right_x)
             right_alignment = 1.0 - min(1.0, right_std / max(right_mean, 1.0))
         
         long_lines = sum(1 for l in line_lengths if l > 60)
-        long_line_ratio = long_lines / len(lines) if lines else 0
+        long_line_ratio = long_lines / len(lines) if lines else 0.0
         
         # Justified text boost
         justified_boost = 0.0
-        if (left_alignment >= 0.8 and right_alignment >= 0.7 and 
+        if (left_alignment >= 0.8 and right_alignment >= 0.7 and
             long_line_ratio >= 0.5 and avg_line_length > 50):
-            justified_boost = 0.3  # Cộng điểm cho text
+            justified_boost = 0.3
         
-        # Text score (base + justified boost + form boost)
+        # Text score calculation
+        # Base score from line length and spacing
         base_score = min(1.0, avg_line_length / 100.0) * 0.5 + spacing_uniformity * 0.5
-        score = base_score + justified_boost + form_boost
         
-        is_text = (avg_line_length >= 30 and spacing_uniformity >= 0.6 and few_columns) or \
-                  (justified_boost > 0) or (form_boost > 0)
+        # Total score with boosts
+        score = base_score + justified_boost + form_boost
+        score = max(0.0, min(1.0, score))  # Clamp to [0, 1]
+        
+        # Text conditions
+        is_text = (
+            (avg_line_length >= 30 and spacing_uniformity >= 0.6 and few_columns)
+            or (justified_boost > 0)
+            or (form_boost > 0)
+        )
         
         return {
             'is_text': is_text,
-            'score': min(1.0, score),  # Cap at 1.0
+            'score': score,
             'avg_line_length': avg_line_length,
             'spacing_uniformity': spacing_uniformity,
+            'few_columns': few_columns,
+            'num_cols': num_cols,
             'justified_boost': justified_boost,
-            'form_boost': form_boost
+            'form_boost': form_boost,
+            'left_alignment': left_alignment,
+            'right_alignment': right_alignment
         }
     
     def analyze_layout(self, ocr_result: Dict[str, Any]) -> Dict[str, Any]:
         """
         Phân tích toàn bộ layout của document.
         
-        Args:
-            ocr_result: Kết quả OCR
-            
-        Returns:
-            {
-                'lines': List[Dict],
-                'blocks': List[Dict],
-                'regions': List[Dict] - với region type và metadata
-            }
+        Stage I: Neutral grouping (token → line → block)
+        Stage II: Region detection for each block
+        
+        Each detector returns {is_xxx, score, ...metadata...}
+        Scores are based on heuristics + geometric statistics from bbox/tokens.
         """
         # Stage I: Neutral grouping
         lines = self.group_tokens_to_lines(ocr_result)
@@ -835,11 +803,11 @@ class DocumentLayoutAnalyzer:
             form_result = self.detect_form_region(block)
             figure_result = self.detect_figure_region(block)
             
-            # Truyền form boost vào text detection
+            # Pass form_boost to text detection
             form_boost = form_result.get('text_boost_score', 0.0)
             text_result = self.detect_text_region(block, form_boost=form_boost)
             
-            # Create region hypotheses
+            # Create hypotheses list
             hypotheses = [
                 {'type': 'table', 'score': table_result['score'], 'metadata': table_result},
                 {'type': 'form', 'score': form_result['score'], 'metadata': form_result},
@@ -847,21 +815,21 @@ class DocumentLayoutAnalyzer:
                 {'type': 'text', 'score': text_result['score'], 'metadata': text_result},
             ]
             
-            # Sort by score and keep top-2
+            # Sort by score (descending) and keep top-2
             hypotheses.sort(key=lambda h: h['score'], reverse=True)
             top_hypotheses = hypotheses[:2]
             
-            # Minimum score thresholds cho từng loại region
+            # Minimum score thresholds for each type
             min_scores = {
-                'table': 0.25,   # Table cần độ tin cậy cao (nhiều columns, alignment)
-                'form': 0.20,    # Form giảm từ 0.25 → 0.20 để bắt form nhỏ hơn
-                'figure': 0.25,  # Figure cần empty center hoặc ticks
-                'text': 0.65     # Text dễ phát hiện hơn, threshold thấp hơn
+                'table': 0.25,   # Table needs high confidence (columns, alignment)
+                'form': 0.20,    # Form threshold
+                'figure': 0.25,  # Figure needs empty center or ticks
+                'text': 0.15     # Text is easier to detect
             }
             
-            # Add to regions
+            # Add qualifying regions
             for hyp in top_hypotheses:
-                min_score = min_scores.get(hyp['type'], 0.2)  # Default 0.2
+                min_score = min_scores.get(hyp['type'], 0.2)
                 if hyp['score'] >= min_score:
                     regions.append({
                         'block_id': block_idx,
