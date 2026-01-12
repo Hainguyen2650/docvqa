@@ -10,7 +10,7 @@ Bao gồm:
 import os
 import json
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Union, Tuple
+from typing import Dict, List, Any, Optional, Union, Tuple, TYPE_CHECKING
 import glob
 
 import numpy as np
@@ -21,6 +21,8 @@ from tqdm import tqdm
 from scipy.ndimage import rotate as scipy_rotate
 
 from .layout_analyzer import DocumentLayoutAnalyzer
+from .content_classifier import ContentClassifier, ClassificationResult, ContentType
+from .bbox_visualizer import BBoxVisualizer
 
 
 class PaddleOCRProcessor:
@@ -55,6 +57,10 @@ class PaddleOCRProcessor:
         
         # Khởi tạo layout analyzer
         self.layout_analyzer = DocumentLayoutAnalyzer()
+        
+        # Khởi tạo content classifier và visualizer
+        self.content_classifier = ContentClassifier(layout_analyzer=self.layout_analyzer)
+        self.bbox_visualizer = BBoxVisualizer()
     
     @staticmethod
     def load_and_fix_exif(image_path: str) -> Image.Image:
@@ -510,6 +516,232 @@ class PaddleOCRProcessor:
                 draw.text(text_pos, label, fill=color)
         
         return img
+    
+    def classify_content(
+        self,
+        ocr_result: Dict[str, Any]
+    ) -> ClassificationResult:
+        """
+        Phân loại nội dung từ kết quả OCR.
+        
+        Phân loại thành 4 loại:
+        - table: Bảng dữ liệu
+        - form: Form với cặp key:value
+        - figure: Chart/plot/biểu đồ
+        - text: Đoạn văn bản thông thường
+        
+        Args:
+            ocr_result: Kết quả từ run_ocr()
+            
+        Returns:
+            ClassificationResult với danh sách regions đã phân loại
+            
+        Example:
+            >>> processor = PaddleOCRProcessor()
+            >>> ocr_result = processor.run_ocr("document.png")
+            >>> classification = processor.classify_content(ocr_result)
+            >>> print(f"Tables: {classification.summary['table']}")
+            >>> print(f"Forms: {classification.summary['form']}")
+            >>> for table in classification.get_tables():
+            ...     print(f"Table content: {table.text_content[:100]}...")
+        """
+        return self.content_classifier.classify(ocr_result)
+    
+    def run_ocr_with_classification(
+        self,
+        image_path: Union[str, Image.Image],
+        use_preprocessing: bool = False,
+        max_size: int = 2500
+    ) -> Tuple[Dict[str, Any], ClassificationResult]:
+        """
+        Chạy OCR và phân loại nội dung trong một bước.
+        
+        Args:
+            image_path: Đường dẫn đến ảnh hoặc PIL Image
+            use_preprocessing: Có áp dụng preprocessing không
+            max_size: Kích thước tối đa nếu dùng preprocessing
+            
+        Returns:
+            Tuple (ocr_result, classification_result)
+            
+        Example:
+            >>> processor = PaddleOCRProcessor()
+            >>> ocr_result, classification = processor.run_ocr_with_classification(
+            ...     "document.png",
+            ...     use_preprocessing=True
+            ... )
+            >>> print(f"Detected {ocr_result['num_lines']} lines")
+            >>> print(f"Classification: {classification.summary}")
+        """
+        ocr_result = self.run_ocr(image_path, use_preprocessing, max_size)
+        classification_result = self.classify_content(ocr_result)
+        return ocr_result, classification_result
+    
+    def draw_classified_regions(
+        self,
+        image_path: str,
+        classification_result: ClassificationResult,
+        fill: bool = True
+    ) -> Image.Image:
+        """
+        Vẽ các vùng đã phân loại lên ảnh với màu sắc theo loại.
+        
+        Màu sắc:
+        - TABLE: Đỏ (Red)
+        - FORM: Xanh dương (Blue)
+        - FIGURE: Xanh lá (Green)
+        - TEXT: Cam (Orange)
+        
+        Args:
+            image_path: Đường dẫn đến ảnh
+            classification_result: Kết quả từ classify_content()
+            fill: Có fill màu bên trong vùng không
+            
+        Returns:
+            PIL Image với các vùng đã được đánh dấu
+            
+        Example:
+            >>> processor = PaddleOCRProcessor()
+            >>> ocr_result = processor.run_ocr("document.png")
+            >>> classification = processor.classify_content(ocr_result)
+            >>> img = processor.draw_classified_regions("document.png", classification)
+            >>> img.save("output_classified.png")
+        """
+        return self.bbox_visualizer.draw_classified_regions(
+            image_path, 
+            classification_result, 
+            fill=fill
+        )
+    
+    def create_demo_visualization(
+        self,
+        image_path: str,
+        ocr_result: Optional[Dict[str, Any]] = None,
+        output_dir: Optional[str] = None,
+        use_preprocessing: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Tạo bộ demo visualization đầy đủ cho một ảnh.
+        
+        Bao gồm:
+        - Ảnh với bounding boxes đã phân loại
+        - Ảnh so sánh (Original | OCR | Classified)
+        - Grid view theo từng loại nội dung
+        - JSON file với classification result
+        
+        Args:
+            image_path: Đường dẫn đến ảnh
+            ocr_result: Kết quả OCR (chạy mới nếu None)
+            output_dir: Thư mục lưu output (tạo cạnh ảnh gốc nếu None)
+            use_preprocessing: Sử dụng preprocessing cho OCR
+            
+        Returns:
+            Dict với paths và results:
+            {
+                'ocr_result': Dict,
+                'classification': ClassificationResult,
+                'output_paths': {
+                    'classified': str,
+                    'comparison': str,
+                    'type_grid': str,
+                    'json': str
+                }
+            }
+            
+        Example:
+            >>> processor = PaddleOCRProcessor()
+            >>> results = processor.create_demo_visualization(
+            ...     "document.png",
+            ...     output_dir="demo_output"
+            ... )
+            >>> print(f"Classification: {results['classification'].summary}")
+            >>> print(f"Outputs: {results['output_paths']}")
+        """
+        from .bbox_visualizer import create_demo_output
+        
+        # Run OCR if not provided
+        if ocr_result is None:
+            print("Đang chạy OCR...")
+            ocr_result = self.run_ocr(image_path, use_preprocessing=use_preprocessing)
+        
+        if not ocr_result['success']:
+            print(f"❌ OCR thất bại: {ocr_result.get('error', 'Unknown error')}")
+            return {
+                'ocr_result': ocr_result,
+                'classification': None,
+                'output_paths': None
+            }
+        
+        # Classify content
+        print("Đang phân loại nội dung...")
+        classification = self.classify_content(ocr_result)
+        
+        # Set output directory
+        if output_dir is None:
+            output_dir = os.path.join(
+                os.path.dirname(image_path),
+                'demo_output'
+            )
+        
+        # Create demo outputs
+        print("Đang tạo visualizations...")
+        output_paths = create_demo_output(image_path, ocr_result, output_dir)
+        
+        # Print summary
+        print(f"\n{'='*60}")
+        print("KẾT QUẢ PHÂN LOẠI NỘI DUNG")
+        print(f"{'='*60}")
+        print(f"Tables:  {classification.summary.get('table', 0)}")
+        print(f"Forms:   {classification.summary.get('form', 0)}")
+        print(f"Figures: {classification.summary.get('figure', 0)}")
+        print(f"Text:    {classification.summary.get('text', 0)}")
+        print(f"{'='*60}")
+        
+        return {
+            'ocr_result': ocr_result,
+            'classification': classification,
+            'output_paths': output_paths
+        }
+    
+    def visualize_content_types(
+        self,
+        image_path: str,
+        ocr_result: Dict[str, Any],
+        content_types: Optional[List[ContentType]] = None,
+        fill: bool = True
+    ) -> Image.Image:
+        """
+        Vẽ chỉ các vùng của một số loại nội dung cụ thể.
+        
+        Args:
+            image_path: Đường dẫn ảnh
+            ocr_result: Kết quả OCR
+            content_types: List các loại cần vẽ (None = tất cả)
+            fill: Có fill màu không
+            
+        Returns:
+            PIL Image
+            
+        Example:
+            >>> processor = PaddleOCRProcessor()
+            >>> ocr_result = processor.run_ocr("document.png")
+            >>> # Chỉ hiển thị tables và forms
+            >>> img = processor.visualize_content_types(
+            ...     "document.png",
+            ...     ocr_result,
+            ...     content_types=[ContentType.TABLE, ContentType.FORM]
+            ... )
+        """
+        classification = self.classify_content(ocr_result)
+        
+        if content_types is None:
+            return self.bbox_visualizer.draw_classified_regions(
+                image_path, classification, fill=fill
+            )
+        else:
+            return self.bbox_visualizer.draw_regions_by_type(
+                image_path, classification, content_types, fill=fill
+            )
     
     @staticmethod
     def save_result_to_json(
